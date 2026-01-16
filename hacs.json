@@ -1,0 +1,7 @@
+{
+  "name": "EduVulcan for HA",
+  "render_readme": true,
+  "domains": [
+    "calendar"
+  ]
+}

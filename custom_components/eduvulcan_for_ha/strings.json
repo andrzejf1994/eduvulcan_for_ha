@@ -1,0 +1,10 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "EduVulcan",
+        "description": "Integration uses token from eduvulcan_token.json. No credentials are configured in UI."
+      }
+    }
+  }
+}
