@@ -102,15 +102,14 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
         return events
 
     def _build_event(self, item: object, tz) -> CalendarEvent | None:
-        account_info = self.coordinator.account_info
         if isinstance(item, dict):
             return _build_generic_event(item, self._definition.all_day, tz)
         if self._definition.kind == KIND_SCHEDULE:
-            return _build_lesson_event(item, account_info, tz)
+            return _build_lesson_event(item, tz)
         if self._definition.kind == KIND_HOMEWORK:
-            return _build_homework_event(item, account_info)
+            return _build_homework_event(item)
         if self._definition.kind == KIND_EXAMS:
-            return _build_exam_event(item, account_info)
+            return _build_exam_event(item)
         return None
 
 
@@ -131,23 +130,10 @@ def _normalize_event_datetime(value: datetime | date, tz) -> datetime:
     return dt_util.as_utc(datetime.combine(value, time.min, tzinfo=tz))
 
 
-def _format_time(value: time) -> str:
-    return value.strftime("%H:%M")
-
-
-def _format_time_range(
-    start_time: time | None,
-    end_time: time | None,
-    display: object | None,
-) -> str | None:
-    if start_time and end_time:
-        return f"{_format_time(start_time)}-{_format_time(end_time)}"
-    if display:
-        return str(display)
-    return None
-
-
-def _build_lesson_event(item: object, account_info, tz) -> CalendarEvent | None:
+def _build_lesson_event(item: object, tz) -> CalendarEvent | None:
+    if _is_cancelled_lesson(item):
+        # Skip cancelled lessons – do not create calendar events
+        return None
     subject_name = _get_nested_value(item, "subject", "name")
     room_code = _get_nested_value(item, "room", "code")
     time_slot = _get_value(item, "time_slot", "timeSlot")
@@ -156,22 +142,100 @@ def _build_lesson_event(item: object, account_info, tz) -> CalendarEvent | None:
     if not time_slot or not start_time or not end_time:
         return None
     summary = subject_name or _get_value(item, "event") or "Lekcja"
-    date_value = _get_value(item, "date_", "date", "dateAt")
+    if _is_substitution_lesson(item):
+        summary = f"{summary} (Zastępstwo)"
+    date_value = _resolve_lesson_date(item)
     if not date_value:
         return None
     start_dt = datetime.combine(date_value, start_time, tzinfo=tz)
     end_dt = datetime.combine(date_value, end_time, tzinfo=tz)
-    description = _build_event_description(KIND_SCHEDULE, item, account_info)
+    description = _build_event_description(KIND_SCHEDULE, item)
+    location = f"Sala {room_code}" if room_code else None
     return CalendarEvent(
         summary=summary,
         start=start_dt,
         end=end_dt,
         description=description,
-        location=room_code,
+        location=location,
     )
 
 
-def _build_homework_event(item: object, account_info) -> CalendarEvent:
+def _resolve_lesson_date(item: object) -> date | None:
+    date_value = _get_value(item, "date_", "date", "dateAt", "DateAt")
+    if isinstance(date_value, datetime):
+        date_value = date_value.date()
+    weekday_value = _get_value(
+        item,
+        "day",
+        "weekday",
+        "day_of_week",
+        "dayOfWeek",
+    )
+    week_start = _get_value(
+        item,
+        "week_start",
+        "weekStart",
+        "week_start_date",
+        "weekStartDate",
+    )
+    if isinstance(week_start, datetime):
+        week_start = week_start.date()
+    normalized_weekday = (
+        _normalize_weekday_value(weekday_value)
+        if isinstance(weekday_value, int)
+        else None
+    )
+    if date_value is None and isinstance(week_start, date) and normalized_weekday:
+        # BUGFIX: schedule events were not created on Mondays due to incorrect weekday mapping
+        return week_start + timedelta(days=normalized_weekday - 1)
+    if isinstance(date_value, date) and normalized_weekday:
+        if normalized_weekday != date_value.isoweekday():
+            # BUGFIX: schedule events were not created on Mondays due to incorrect weekday mapping
+            return date_value + timedelta(
+                days=normalized_weekday - date_value.isoweekday()
+            )
+    return date_value
+
+
+def _normalize_weekday_value(value: int) -> int | None:
+    if 1 <= value <= 7:
+        return value
+    if 0 <= value <= 6:
+        return value + 1
+    return None
+
+
+def _is_cancelled_lesson(item: object) -> bool:
+    if _get_value(
+        item,
+        "cancelled",
+        "canceled",
+        "is_cancelled",
+        "is_canceled",
+        "isCancelled",
+        "isCanceled",
+    ):
+        return True
+    status = _get_value(item, "status")
+    return isinstance(status, str) and status.upper() == "CANCELLED"
+
+
+def _is_substitution_lesson(item: object) -> bool:
+    if _get_value(
+        item,
+        "substitution",
+        "is_substitution",
+        "isSubstitution",
+        "replacement",
+        "is_replacement",
+        "isReplacement",
+    ):
+        return True
+    status = _get_value(item, "status")
+    return isinstance(status, str) and status.upper() in {"SUBSTITUTION", "REPLACEMENT"}
+
+
+def _build_homework_event(item: object) -> CalendarEvent:
     subject_name = _get_nested_value(item, "subject", "name")
     summary = f"{subject_name} – Zadanie" if subject_name else "Zadanie"
     deadline = _get_value(item, "deadline", "deadlineAt") or _get_value(
@@ -181,7 +245,7 @@ def _build_homework_event(item: object, account_info) -> CalendarEvent:
     if not start_date:
         start_date = date.today()
     end_date = start_date + timedelta(days=1)
-    description = _build_event_description(KIND_HOMEWORK, item, account_info)
+    description = _build_event_description(KIND_HOMEWORK, item)
     return CalendarEvent(
         summary=summary,
         start=start_date,
@@ -190,7 +254,7 @@ def _build_homework_event(item: object, account_info) -> CalendarEvent:
     )
 
 
-def _build_exam_event(item: object, account_info) -> CalendarEvent:
+def _build_exam_event(item: object) -> CalendarEvent:
     subject_name = _get_nested_value(item, "subject", "name")
     summary = f"{subject_name} – Sprawdzian" if subject_name else "Sprawdzian"
     deadline = _get_value(item, "deadline", "deadlineAt")
@@ -198,7 +262,7 @@ def _build_exam_event(item: object, account_info) -> CalendarEvent:
     if not start_date:
         start_date = date.today()
     end_date = start_date + timedelta(days=1)
-    description = _build_event_description(KIND_EXAMS, item, account_info)
+    description = _build_event_description(KIND_EXAMS, item)
     return CalendarEvent(
         summary=summary,
         start=start_date,
@@ -207,13 +271,8 @@ def _build_exam_event(item: object, account_info) -> CalendarEvent:
     )
 
 
-def _build_event_description(
-    kind: str,
-    item: object,
-    account_info,
-) -> str | None:
+def _build_event_description(kind: str, item: object) -> str | None:
     lines: list[str] = []
-    _add_common_account_lines(lines, account_info)
     if kind == KIND_SCHEDULE:
         _add_schedule_description(lines, item)
     elif kind == KIND_HOMEWORK:
@@ -224,109 +283,37 @@ def _build_event_description(
 
 
 def _add_schedule_description(lines: list[str], item: object) -> None:
-    subject_name = _get_nested_value(item, "subject", "name")
-    room_code = _get_nested_value(item, "room", "code")
-    time_slot = _get_value(item, "time_slot", "timeSlot")
-    start_time = _get_value(time_slot, "start")
-    end_time = _get_value(time_slot, "end")
-    _add_line(lines, "Przedmiot", subject_name)
-    _add_line(
-        lines,
-        "Nauczyciel",
+    teachers = [
         _teacher_name(_get_value(item, "teacher_primary", "teacherPrimary")),
-    )
-    _add_line(
-        lines,
-        "Nauczyciel dodatkowy",
         _teacher_name(_get_value(item, "teacher_secondary", "teacherSecondary")),
-    )
-    _add_line(
-        lines,
-        "Nauczyciel dodatkowy 2",
         _teacher_name(_get_value(item, "teacher_secondary2", "teacherSecondary2")),
-    )
-    _add_line(lines, "Sala", room_code)
-    _add_line(lines, "Klasa", _get_nested_value(item, "clazz", "symbol"))
-    _add_line(
-        lines,
-        "Grupa",
-        _get_nested_value(item, "distribution", "shortcut")
-        or _get_nested_value(item, "distribution", "name"),
-    )
-    _add_line(
-        lines,
-        "Typ lekcji",
-        _get_nested_value(item, "distribution", "part_type")
-        or _get_nested_value(item, "distribution", "partType"),
-    )
-    _add_line(
-        lines,
-        "Godziny",
-        _format_time_range(
-            start_time,
-            end_time,
-            _get_value(time_slot, "display"),
-        ),
-    )
-    _add_line(lines, "Numer lekcji", _get_value(time_slot, "position"))
-    _add_line(lines, "Uwagi", _get_value(item, "event"))
-    _add_line(lines, "Alias ucznia", _get_value(item, "pupil_alias", "pupilAlias"))
-    _add_line(lines, "Rodzic", _get_value(item, "parent"))
+    ]
+    teacher_names = [teacher for teacher in teachers if teacher]
+    if not teacher_names:
+        return
+    label = "Nauczyciele" if len(teacher_names) > 1 else "Nauczyciel"
+    _add_line(lines, label, ", ".join(teacher_names))
 
 
 def _add_homework_description(lines: list[str], item: object) -> None:
     _add_line(lines, "Przedmiot", _get_nested_value(item, "subject", "name"))
     _add_line(lines, "Treść", _get_value(item, "content", "description"))
-    _add_line(lines, "Nauczyciel", _teacher_name(_get_value(item, "creator")))
-    _add_line(lines, "Termin", _get_value(item, "deadline", "deadlineAt"))
-    _add_line(lines, "Data lekcji", _get_value(item, "date_", "date", "dateAt"))
     _add_line(lines, "Utworzono", _get_value(item, "created_at", "createdAt"))
     _add_line(lines, "Zmieniono", _get_value(item, "modified_at", "modifiedAt"))
-    _add_line(
-        lines,
-        "Wymaga odpowiedzi",
-        _get_value(item, "is_answer_required", "isAnswerRequired"),
-    )
-    _add_line(lines, "Odpowiedź do", _get_value(item, "answer_at", "answerAt"))
-    attachments = _get_value(item, "attachments") or []
-    if attachments:
-        attachment_names = ", ".join(
-            str(_get_value(attachment, "name") or attachment)
-            for attachment in attachments
-        )
-        _add_line(lines, "Załączniki", attachment_names)
-        attachment_links = ", ".join(
-            str(_get_value(attachment, "link"))
-            for attachment in attachments
-            if _get_value(attachment, "link")
-        )
-        _add_line(lines, "Linki", attachment_links)
-    _add_line(lines, "Metadane", _get_value(item, "didactics"))
 
 
 def _add_exam_description(lines: list[str], item: object) -> None:
-    _add_line(lines, "Przedmiot", _get_nested_value(item, "subject", "name"))
     _add_line(lines, "Rodzaj", _get_value(item, "type"))
     _add_line(lines, "Opis", _get_value(item, "content", "description"))
     _add_line(lines, "Nauczyciel", _teacher_name(_get_value(item, "creator")))
-    _add_line(lines, "Termin", _get_value(item, "deadline", "deadlineAt"))
     _add_line(lines, "Utworzono", _get_value(item, "created_at", "createdAt"))
     _add_line(lines, "Zmieniono", _get_value(item, "modified_at", "modifiedAt"))
-    _add_line(lines, "Id typu", _get_value(item, "type_id", "typeId"))
-    _add_line(lines, "Metadane", _get_value(item, "didactics"))
 
 
 def _teacher_name(teacher) -> str | None:
     if not teacher:
         return None
     return teacher.display_name or f"{teacher.name} {teacher.surname}"
-
-
-def _add_common_account_lines(lines: list[str], account_info) -> None:
-    if not account_info:
-        return
-    _add_line(lines, "Uczeń", account_info.pupil_name)
-    _add_line(lines, "Jednostka", account_info.unit_name)
 
 
 def _add_line(lines: list[str], label: str, value: object) -> None:
