@@ -53,7 +53,6 @@ class EduVulcanAccountInfo:
 
     pupil_id: int
     pupil_name: str
-    unit_id: int
     unit_name: str
     unit_short: str
     rest_url: str
@@ -98,24 +97,6 @@ class EduVulcanApi:
         return EduVulcanAccountInfo(
             pupil_id=pupil.id,
             pupil_name=f"{pupil.first_name} {pupil.surname}",
-            unit_id=unit.id,
-            unit_name=unit.name,
-            unit_short=unit.short,
-            rest_url=rest_url,
-        )
-
-    async def async_get_accounts(self, token: TokenData):
-        await self._api.register_by_jwt(tokens=[token.jwt], tenant=token.tenant)
-        return await self._api.get_accounts()
-
-    def build_account_info(self, account) -> EduVulcanAccountInfo:
-        unit = account.unit
-        pupil = account.pupil
-        rest_url = unit.rest_url or self._credential.rest_url
-        return EduVulcanAccountInfo(
-            pupil_id=pupil.id,
-            pupil_name=f"{pupil.first_name} {pupil.surname}",
-            unit_id=unit.id,
             unit_name=unit.name,
             unit_short=unit.short,
             rest_url=rest_url,
@@ -154,32 +135,12 @@ class EduVulcanApi:
             date_to=end_date,
         )
 
-    async def async_get_vacation(
-        self, token: TokenData, start_date: date, end_date: date
-    ) -> list[object]:
-        account = await self.async_get_account_info(token)
-        return await self._api.get_vacation(
-            rest_url=account.rest_url,
-            unit_id=account.unit_id,
-            date_from=start_date,
-            date_to=end_date,
-        )
-
     async def async_fetch_all(
         self, start_date: date, end_date: date
     ) -> tuple[dict[str, list[object]], EduVulcanAccountInfo, TokenData]:
         """Fetch lessons, homework, and exams from Iris."""
         token = await self.async_load_token()
         account = await self.async_get_account_info(token)
-        data = await self.async_fetch_all_for_account(account, start_date, end_date)
-        return data, account, token
-
-    async def async_fetch_all_for_account(
-        self,
-        account: EduVulcanAccountInfo,
-        start_date: date,
-        end_date: date,
-    ) -> dict[str, list[object]]:
         lessons = await self._api.get_schedule(
             rest_url=account.rest_url,
             pupil_id=account.pupil_id,
@@ -198,18 +159,11 @@ class EduVulcanApi:
             date_from=start_date,
             date_to=end_date,
         )
-        vacations = await self._api.get_vacation(
-            rest_url=account.rest_url,
-            unit_id=account.unit_id,
-            date_from=start_date,
-            date_to=end_date,
-        )
         return {
             "schedule": lessons,
             "homework": homework,
             "exams": exams,
-            "vacations": vacations,
-        }
+        }, account, token
 
     async def async_close(self) -> None:
         """Close underlying HTTP session."""

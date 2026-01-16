@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from .._http_client import HttpClient
 from ..credentials import ICredential
-from ..models import Account, Exam, Homework, Schedule, Vacation
+from ..models import Account, Exam, Homework, Schedule
 
 EPOCH_START_DATETIME = datetime(1970, 1, 1, 1, 0, 0)
 INT_MIN = -2_147_483_648
@@ -103,22 +103,3 @@ class IrisApi:
             },
         )
         return [Schedule.model_validate(schedule) for schedule in envelope]
-
-    async def get_vacation(
-        self,
-        rest_url: str,
-        unit_id: int,
-        date_from: date,
-        date_to: date,
-    ) -> list[Vacation]:
-        envelope = await self._http.request(
-            method="GET",
-            rest_url=rest_url,
-            endpoint="mobile/holidays",
-            query={
-                "unitId": unit_id,
-                "dateFrom": date_from,
-                "dateTo": date_to,
-            },
-        )
-        return [Vacation.model_validate(vacation) for vacation in envelope]

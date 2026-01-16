@@ -10,15 +10,6 @@ from ._subject import Subject
 from ._timeslot import Timeslot
 
 
-class ScheduleSubstitution(BaseModel):
-    teacher_primary: Employee | None = Field(alias="TeacherPrimary")
-    teacher_secondary: Employee | None = Field(alias="TeacherSecondary")
-    teacher_secondary2: Employee | None = Field(alias="TeacherSecondary2")
-    room: Room | None = Field(alias="Room")
-    time_slot: Timeslot | None = Field(alias="TimeSlot")
-    class_absence: bool = Field(alias="ClassAbsence")
-
-
 class Schedule(BaseModel):
     id: int = Field(alias="Id")
     merge_change_id: int | None = Field(alias="MergeChangeId")
@@ -34,4 +25,3 @@ class Schedule(BaseModel):
     distribution: Distribution | None = Field(alias="Distribution")
     pupil_alias: str | None = Field(alias="PupilAlias")
     parent: str | None = Field(alias="Parent")
-    substitution: ScheduleSubstitution | None = Field(alias="Substitution")
