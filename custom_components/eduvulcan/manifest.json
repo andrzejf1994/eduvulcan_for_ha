@@ -1,8 +1,9 @@
 {
   "domain": "eduvulcan",
   "name": "EduVulcan",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "config_flow": true,
   "requirements": [],
-  "iot_class": "cloud_polling"
+  "iot_class": "cloud_polling",
+  "platforms": ["calendar"]
 }

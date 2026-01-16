@@ -4,20 +4,36 @@ from __future__ import annotations
 
 import json
 import logging
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from iris.api import IrisHebeCeApi
-from iris.credentials import RsaCredential
-
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
-from .const import TOKEN_FILENAME
+from .const import TOKEN_FILE
+from .iris_client.api import IrisHebeCeApi
+from .iris_client.credentials import RsaCredential
 
 _LOGGER = logging.getLogger(__name__)
+
+PREMIUM_CAPS = "[\"EDUVULCAN_PREMIUM\"]"
+
+_POLISH_TRANSLATION = str.maketrans(
+    {
+        "ą": "a",
+        "ć": "c",
+        "ę": "e",
+        "ł": "l",
+        "ń": "n",
+        "ó": "o",
+        "ś": "s",
+        "ż": "z",
+        "ź": "z",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -26,7 +42,9 @@ class TokenData:
 
     jwt: str
     tenant: str
-    caps: list[str]
+    name: str
+    uid: str
+    caps: str
 
 
 @dataclass(slots=True)
@@ -45,109 +63,144 @@ class EduVulcanApi:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
+        self._credential = RsaCredential.create_new("Android", "SM-A525F")
+        self._api = IrisHebeCeApi(self._credential)
 
-    async def async_fetch_data(
-        self, start_date: date, end_date: date
-    ) -> tuple[dict[str, Any], EduVulcanAccountInfo]:
-        """Fetch lessons, homework, and exams from Iris."""
-        token_data = await self._async_load_token_data()
-        credential = RsaCredential.create_new("Android", "SM-A525F")
-        api = IrisHebeCeApi(credential)
-        try:
-            await api.register_by_jwt(tokens=[token_data.jwt], tenant=token_data.tenant)
-            accounts = await api.get_accounts()
-            if not accounts:
-                _LOGGER.error("No accounts returned by Iris API.")
-                raise ConfigEntryNotReady("No accounts returned by Iris API.")
-            account = accounts[0]
-            pupil = account.pupil
-            unit = account.unit
-            rest_url = unit.rest_url or credential.rest_url
-            account_info = EduVulcanAccountInfo(
-                pupil_id=pupil.id,
-                pupil_name=f"{pupil.first_name} {pupil.surname}",
-                unit_name=unit.name,
-                unit_short=unit.short,
-                rest_url=rest_url,
-            )
-            lessons = await api.get_schedule(
-                rest_url=rest_url,
-                pupil_id=pupil.id,
-                date_from=start_date,
-                date_to=end_date,
-            )
-            homework = await api.get_homework(
-                rest_url=rest_url,
-                pupil_id=pupil.id,
-                date_from=start_date,
-                date_to=end_date,
-            )
-            exams = await api.get_exams(
-                rest_url=rest_url,
-                pupil_id=pupil.id,
-                date_from=start_date,
-                date_to=end_date,
-            )
-            return {
-                "lessons": lessons,
-                "homework": homework,
-                "exams": exams,
-            }, account_info
-        finally:
-            await self._async_close_api(api)
-
-    async def _async_load_token_data(self) -> TokenData:
-        config = self._hass.config
-        token_path = Path(config.path(TOKEN_FILENAME))
-        if not token_path.exists():
-            _LOGGER.error("Token file missing at %s", token_path)
-            raise ConfigEntryNotReady("Token file missing.")
-        data = await self._hass.async_add_executor_job(self._read_json_file, token_path)
+    async def async_load_token(self) -> TokenData:
+        """Load token file and validate premium capabilities."""
+        data = await self._async_read_token_file()
         jwt = data.get("jwt")
         tenant = data.get("tenant")
-        jwt_payload = data.get("jwt_payload", {})
-        caps_raw = jwt_payload.get("caps", [])
-        caps = self._normalize_caps(caps_raw)
+        jwt_payload = data.get("jwt_payload") or {}
+        name = jwt_payload.get("name")
+        uid = jwt_payload.get("uid")
+        caps = jwt_payload.get("caps")
         if not jwt or not tenant:
-            _LOGGER.error("Token file must contain 'jwt' and 'tenant'.")
-            raise ConfigEntryNotReady("Token file missing required fields.")
-        if "EDUVULCAN_PREMIUM" not in caps:
-            _LOGGER.error("Token file missing EDUVULCAN_PREMIUM capability.")
-            raise ConfigEntryNotReady(
-                "Token file missing EDUVULCAN_PREMIUM capability."
-            )
-        return TokenData(jwt=jwt, tenant=tenant, caps=caps)
+            raise HomeAssistantError("Token file missing required fields.")
+        if not name or not uid:
+            raise HomeAssistantError("Token payload missing name or uid.")
+        if caps != PREMIUM_CAPS:
+            _LOGGER.error("Premium required")
+            raise ConfigEntryAuthFailed("Premium required")
+        return TokenData(jwt=jwt, tenant=tenant, name=name, uid=uid, caps=caps)
 
-    @staticmethod
-    def _normalize_caps(caps_raw: Any) -> list[str]:
-        if isinstance(caps_raw, list):
-            if not all(isinstance(item, str) for item in caps_raw):
-                _LOGGER.error("caps list must contain only strings.")
-                raise ConfigEntryNotReady("Invalid caps list.")
-            return list(caps_raw)
-        if isinstance(caps_raw, str):
-            try:
-                parsed = json.loads(caps_raw)
-            except json.JSONDecodeError:
-                return [caps_raw]
-            if isinstance(parsed, str):
-                return [parsed]
-            if isinstance(parsed, list) and all(
-                isinstance(item, str) for item in parsed
-            ):
-                return list(parsed)
-            _LOGGER.error("caps string did not parse to a list of strings.")
-            raise ConfigEntryNotReady("Invalid caps string format.")
-        _LOGGER.error("caps value must be a list or string.")
-        raise ConfigEntryNotReady("Invalid caps value.")
+    async def async_get_account_info(self, token: TokenData) -> EduVulcanAccountInfo:
+        """Register token and return pupil + unit details."""
+        await self._api.register_by_jwt(tokens=[token.jwt], tenant=token.tenant)
+        accounts = await self._api.get_accounts()
+        if not accounts:
+            raise HomeAssistantError("No accounts returned by Iris API.")
+        account = accounts[0]
+        pupil = account.pupil
+        unit = account.unit
+        rest_url = unit.rest_url or self._credential.rest_url
+        return EduVulcanAccountInfo(
+            pupil_id=pupil.id,
+            pupil_name=f"{pupil.first_name} {pupil.surname}",
+            unit_name=unit.name,
+            unit_short=unit.short,
+            rest_url=rest_url,
+        )
+
+    async def async_get_schedule(
+        self, token: TokenData, start_date: date, end_date: date
+    ) -> list[object]:
+        account = await self.async_get_account_info(token)
+        return await self._api.get_schedule(
+            rest_url=account.rest_url,
+            pupil_id=account.pupil_id,
+            date_from=start_date,
+            date_to=end_date,
+        )
+
+    async def async_get_homework(
+        self, token: TokenData, start_date: date, end_date: date
+    ) -> list[object]:
+        account = await self.async_get_account_info(token)
+        return await self._api.get_homework(
+            rest_url=account.rest_url,
+            pupil_id=account.pupil_id,
+            date_from=start_date,
+            date_to=end_date,
+        )
+
+    async def async_get_exams(
+        self, token: TokenData, start_date: date, end_date: date
+    ) -> list[object]:
+        account = await self.async_get_account_info(token)
+        return await self._api.get_exams(
+            rest_url=account.rest_url,
+            pupil_id=account.pupil_id,
+            date_from=start_date,
+            date_to=end_date,
+        )
+
+    async def async_fetch_all(
+        self, start_date: date, end_date: date
+    ) -> tuple[dict[str, list[object]], EduVulcanAccountInfo, TokenData]:
+        """Fetch lessons, homework, and exams from Iris."""
+        token = await self.async_load_token()
+        account = await self.async_get_account_info(token)
+        lessons = await self._api.get_schedule(
+            rest_url=account.rest_url,
+            pupil_id=account.pupil_id,
+            date_from=start_date,
+            date_to=end_date,
+        )
+        homework = await self._api.get_homework(
+            rest_url=account.rest_url,
+            pupil_id=account.pupil_id,
+            date_from=start_date,
+            date_to=end_date,
+        )
+        exams = await self._api.get_exams(
+            rest_url=account.rest_url,
+            pupil_id=account.pupil_id,
+            date_from=start_date,
+            date_to=end_date,
+        )
+        return {
+            "schedule": lessons,
+            "homework": homework,
+            "exams": exams,
+        }, account, token
+
+    async def async_close(self) -> None:
+        """Close underlying HTTP session."""
+        await self._api.async_close()
+
+    async def _async_read_token_file(self) -> dict[str, Any]:
+        token_path = Path(self._hass.config.path(TOKEN_FILE))
+        if not token_path.exists():
+            raise HomeAssistantError("Token file missing.")
+        return await self._hass.async_add_executor_job(
+            self._read_json_file, token_path
+        )
 
     @staticmethod
     def _read_json_file(path: Path) -> dict[str, Any]:
         with path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
 
-    async def _async_close_api(self, api: IrisHebeCeApi) -> None:
-        http_client = getattr(api, "_http", None)
-        client = getattr(http_client, "_client", None)
-        if client is not None and not client.closed:
-            await client.close()
+
+def slugify_name(name: str) -> str:
+    """Normalize name to Home Assistant slug format."""
+    normalized = unicodedata.normalize("NFKD", name).lower()
+    normalized = normalized.translate(_POLISH_TRANSLATION)
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+    slug_chars: list[str] = []
+    last_was_sep = False
+    for char in normalized:
+        if char.isalnum():
+            slug_chars.append(char)
+            last_was_sep = False
+        else:
+            if not last_was_sep:
+                slug_chars.append("_")
+                last_was_sep = True
+    slug = "".join(slug_chars).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug
