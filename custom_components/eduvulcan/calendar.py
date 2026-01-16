@@ -62,6 +62,27 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
         self._attr_unique_id = f"{uid}_{definition.kind}"
         self.entity_id = f"calendar.eduvulcan_{slug}_{definition.kind}"
 
+    @property
+    def event(self) -> CalendarEvent | None:
+        """Return the next upcoming event."""
+        data = self.coordinator.data or {}
+        items = data.get(self._definition.kind, [])
+        tz = dt_util.get_time_zone(self.hass.config.time_zone)
+        now = dt_util.utcnow()
+        upcoming: list[CalendarEvent] = []
+        for item in items:
+            event = self._build_event(item, tz)
+            if event is None:
+                continue
+            if _normalize_event_datetime(event.end, tz) >= now:
+                upcoming.append(event)
+        if not upcoming:
+            return None
+        return min(
+            upcoming,
+            key=lambda candidate: _normalize_event_datetime(candidate.start, tz),
+        )
+
     async def async_get_events(
         self,
         hass: HomeAssistant,
@@ -82,6 +103,8 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
 
     def _build_event(self, item: object, tz) -> CalendarEvent | None:
         account_info = self.coordinator.account_info
+        if isinstance(item, dict):
+            return _build_generic_event(item, self._definition.all_day, tz)
         if self._definition.kind == KIND_SCHEDULE:
             return _build_lesson_event(item, account_info, tz)
         if self._definition.kind == KIND_HOMEWORK:
@@ -109,34 +132,44 @@ def _normalize_event_datetime(value: datetime | date, tz) -> datetime:
 
 
 def _build_lesson_event(item: object, account_info, tz) -> CalendarEvent | None:
-    subject_name = item.subject.name if getattr(item, "subject", None) else None
-    room_code = getattr(getattr(item, "room", None), "code", None)
-    if not getattr(item, "time_slot", None):
+    subject_name = _get_nested_value(item, "subject", "name")
+    room_code = _get_nested_value(item, "room", "code")
+    time_slot = _get_value(item, "time_slot", "timeSlot")
+    start_time = _get_value(time_slot, "start")
+    end_time = _get_value(time_slot, "end")
+    if not time_slot or not start_time or not end_time:
         return None
-    summary = subject_name or item.event or "Lekcja"
+    summary = subject_name or _get_value(item, "event") or "Lekcja"
     if room_code:
         summary = f"{summary} ({room_code})"
-    start_dt = datetime.combine(item.date_, item.time_slot.start, tzinfo=tz)
-    end_dt = datetime.combine(item.date_, item.time_slot.end, tzinfo=tz)
+    date_value = _get_value(item, "date_", "date", "dateAt")
+    if not date_value:
+        return None
+    start_dt = datetime.combine(date_value, start_time, tzinfo=tz)
+    end_dt = datetime.combine(date_value, end_time, tzinfo=tz)
     description_lines = []
     _add_common_account_lines(description_lines, account_info)
     _add_line(description_lines, "Przedmiot", subject_name)
     _add_line(description_lines, "Sala", room_code)
-    _add_line(description_lines, "Klasa", getattr(getattr(item, "clazz", None), "symbol", None))
+    _add_line(
+        description_lines,
+        "Klasa",
+        _get_nested_value(item, "clazz", "symbol"),
+    )
     _add_line(
         description_lines,
         "Nauczyciel",
-        _teacher_name(getattr(item, "teacher_primary", None)),
+        _teacher_name(_get_value(item, "teacher_primary", "teacherPrimary")),
     )
     _add_line(
         description_lines,
         "Nauczyciel dodatkowy",
-        _teacher_name(getattr(item, "teacher_secondary", None)),
+        _teacher_name(_get_value(item, "teacher_secondary", "teacherSecondary")),
     )
     _add_line(
         description_lines,
         "Uwagi",
-        getattr(item, "event", None),
+        _get_value(item, "event"),
     )
     return CalendarEvent(
         summary=summary,
@@ -148,9 +181,11 @@ def _build_lesson_event(item: object, account_info, tz) -> CalendarEvent | None:
 
 
 def _build_homework_event(item: object, account_info) -> CalendarEvent:
-    subject_name = item.subject.name if getattr(item, "subject", None) else None
+    subject_name = _get_nested_value(item, "subject", "name")
     summary = f"{subject_name} – Zadanie" if subject_name else "Zadanie"
-    deadline = getattr(item, "deadline", None) or getattr(item, "date_", None)
+    deadline = _get_value(item, "deadline", "deadlineAt") or _get_value(
+        item, "date_", "date", "dateAt"
+    )
     start_date = deadline.date() if isinstance(deadline, datetime) else deadline
     if not start_date:
         start_date = date.today()
@@ -158,25 +193,33 @@ def _build_homework_event(item: object, account_info) -> CalendarEvent:
     description_lines = []
     _add_common_account_lines(description_lines, account_info)
     _add_line(description_lines, "Przedmiot", subject_name)
-    _add_line(description_lines, "Termin", getattr(item, "deadline", None))
-    _add_line(description_lines, "Opis", getattr(item, "content", None))
+    _add_line(description_lines, "Termin", _get_value(item, "deadline", "deadlineAt"))
+    _add_line(description_lines, "Opis", _get_value(item, "content", "description"))
     _add_line(
         description_lines,
         "Nauczyciel",
-        _teacher_name(getattr(item, "creator", None)),
+        _teacher_name(_get_value(item, "creator")),
     )
     _add_line(
         description_lines,
         "Wymaga odpowiedzi",
-        getattr(item, "is_answer_required", None),
+        _get_value(item, "is_answer_required", "isAnswerRequired"),
     )
-    attachments = getattr(item, "attachments", [])
+    attachments = _get_value(item, "attachments") or []
     if attachments:
-        _add_line(description_lines, "Załączniki", ", ".join(a.name for a in attachments))
+        attachment_names = ", ".join(
+            str(_get_value(attachment, "name") or attachment)
+            for attachment in attachments
+        )
+        _add_line(description_lines, "Załączniki", attachment_names)
         _add_line(
             description_lines,
             "Linki",
-            ", ".join(a.link for a in attachments),
+            ", ".join(
+                str(_get_value(attachment, "link"))
+                for attachment in attachments
+                if _get_value(attachment, "link")
+            ),
         )
     return CalendarEvent(
         summary=summary,
@@ -187,9 +230,9 @@ def _build_homework_event(item: object, account_info) -> CalendarEvent:
 
 
 def _build_exam_event(item: object, account_info) -> CalendarEvent:
-    subject_name = item.subject.name if getattr(item, "subject", None) else None
+    subject_name = _get_nested_value(item, "subject", "name")
     summary = f"{subject_name} – Sprawdzian" if subject_name else "Sprawdzian"
-    deadline = getattr(item, "deadline", None)
+    deadline = _get_value(item, "deadline", "deadlineAt")
     start_date = deadline.date() if isinstance(deadline, datetime) else deadline
     if not start_date:
         start_date = date.today()
@@ -197,13 +240,13 @@ def _build_exam_event(item: object, account_info) -> CalendarEvent:
     description_lines = []
     _add_common_account_lines(description_lines, account_info)
     _add_line(description_lines, "Przedmiot", subject_name)
-    _add_line(description_lines, "Typ", getattr(item, "type", None))
-    _add_line(description_lines, "Termin", getattr(item, "deadline", None))
-    _add_line(description_lines, "Opis", getattr(item, "content", None))
+    _add_line(description_lines, "Typ", _get_value(item, "type"))
+    _add_line(description_lines, "Termin", _get_value(item, "deadline", "deadlineAt"))
+    _add_line(description_lines, "Opis", _get_value(item, "content", "description"))
     _add_line(
         description_lines,
         "Nauczyciel",
-        _teacher_name(getattr(item, "creator", None)),
+        _teacher_name(_get_value(item, "creator")),
     )
     return CalendarEvent(
         summary=summary,
@@ -230,3 +273,76 @@ def _add_line(lines: list[str], label: str, value: object) -> None:
     if value is None or value == "":
         return
     lines.append(f"{label}: {value}")
+
+
+def _build_generic_event(
+    item: dict[str, object],
+    all_day: bool,
+    tz,
+) -> CalendarEvent | None:
+    summary = (
+        _get_value(item, "summary", "title", "subject", "name") or "Wydarzenie"
+    )
+    description = _get_value(item, "description", "content", "details")
+    start_value = _get_value(
+        item,
+        "start",
+        "start_date",
+        "start_datetime",
+        "date",
+        "date_",
+        "dateAt",
+    )
+    end_value = _get_value(item, "end", "end_date", "end_datetime")
+    start = _coerce_event_datetime(start_value, all_day, tz)
+    if start is None:
+        return None
+    end = _coerce_event_datetime(end_value, all_day, tz)
+    if end is None:
+        end = (
+            start + timedelta(days=1)
+            if all_day
+            else start + timedelta(hours=1)
+        )
+    return CalendarEvent(
+        summary=str(summary),
+        start=start,
+        end=end,
+        description=str(description) if description else None,
+    )
+
+
+def _coerce_event_datetime(
+    value: object,
+    all_day: bool,
+    tz,
+) -> datetime | date | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=tz)
+        return value.date() if all_day else value
+    if isinstance(value, date):
+        return value if all_day else datetime.combine(value, time.min, tzinfo=tz)
+    return None
+
+
+def _get_value(item: object, *keys: str) -> object | None:
+    for key in keys:
+        if isinstance(item, dict):
+            if key in item:
+                return item[key]
+        elif hasattr(item, key):
+            return getattr(item, key)
+    return None
+
+
+def _get_nested_value(item: object, *keys: str) -> object | None:
+    current: object | None = item
+    for key in keys:
+        if current is None:
+            return None
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            current = getattr(current, key, None)
+    return current
