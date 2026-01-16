@@ -29,10 +29,33 @@ class EduVulcanCoordinator(DataUpdateCoordinator[dict[str, object]]):
         self.last_error: str | None = None
 
     async def _async_update_data(self) -> dict[str, object]:
-        start_date, end_date = _resolve_date_range(date.today())
         try:
-            data, account_info, token = await self.api.async_fetch_all(
-                start_date, end_date
+            token = await self.api.async_load_token()
+            accounts = await self.api.async_get_accounts(token)
+            if not accounts:
+                raise UpdateFailed("No accounts returned by Iris API.")
+            account = accounts[0]
+            period = next(
+                (period for period in (account.periods or []) if period.current),
+                None,
+            )
+            if period:
+                start_date, end_date = period.date_from, period.date_to
+                _LOGGER.debug(
+                    "Using current period date range: %s - %s",
+                    start_date,
+                    end_date,
+                )
+            else:
+                start_date, end_date = _resolve_date_range(date.today())
+                _LOGGER.debug(
+                    "Using fallback school year date range: %s - %s",
+                    start_date,
+                    end_date,
+                )
+            account_info = self.api.build_account_info(account)
+            data = await self.api.async_fetch_all_for_account(
+                account_info, start_date, end_date
             )
         except Exception as err:  # noqa: BLE001 - surface update failure only
             self.last_error = str(err)

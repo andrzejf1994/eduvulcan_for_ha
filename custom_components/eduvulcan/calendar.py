@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+import logging
 
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
@@ -14,7 +15,9 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, KIND_EXAMS, KIND_HOMEWORK, KIND_SCHEDULE
 from .coordinator import EduVulcanCoordinator
+from .iris_client.models import ScheduleSubstitution, Vacation
 
+_LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CalendarDefinition:
@@ -65,8 +68,7 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
     @property
     def event(self) -> CalendarEvent | None:
         """Return the next upcoming event."""
-        data = self.coordinator.data or {}
-        items = data.get(self._definition.kind, [])
+        items = _get_calendar_items(self.coordinator.data or {}, self._definition.kind)
         tz = dt_util.get_time_zone(self.hass.config.time_zone)
         now = dt_util.utcnow()
         upcoming: list[CalendarEvent] = []
@@ -89,8 +91,7 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
         start_date: datetime,
         end_date: datetime,
     ) -> list[CalendarEvent]:
-        data = self.coordinator.data or {}
-        items = data.get(self._definition.kind, [])
+        items = _get_calendar_items(self.coordinator.data or {}, self._definition.kind)
         tz = dt_util.get_time_zone(hass.config.time_zone)
         events: list[CalendarEvent] = []
         for item in items:
@@ -102,6 +103,8 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
         return events
 
     def _build_event(self, item: object, tz) -> CalendarEvent | None:
+        if isinstance(item, Vacation):
+            return _build_vacation_event(item)
         if isinstance(item, dict):
             return _build_generic_event(item, self._definition.all_day, tz)
         if self._definition.kind == KIND_SCHEDULE:
@@ -130,19 +133,33 @@ def _normalize_event_datetime(value: datetime | date, tz) -> datetime:
     return dt_util.as_utc(datetime.combine(value, time.min, tzinfo=tz))
 
 
+def _get_calendar_items(
+    data: dict[str, object],
+    kind: str,
+) -> list[object]:
+    items = list(data.get(kind, []) or [])
+    if kind == KIND_SCHEDULE:
+        items.extend(data.get("vacations", []) or [])
+    return items
+
+
 def _build_lesson_event(item: object, tz) -> CalendarEvent | None:
+    substitution = _get_value(item, "substitution")
     if _is_cancelled_lesson(item):
-        # Skip cancelled lessons – do not create calendar events
+        _LOGGER.debug("Cancelled lesson detected, skipping calendar event.")
         return None
     subject_name = _get_nested_value(item, "subject", "name")
-    room_code = _get_nested_value(item, "room", "code")
-    time_slot = _get_value(item, "time_slot", "timeSlot")
+    time_slot = _get_value(
+        substitution, "time_slot", "timeSlot"
+    ) or _get_value(item, "time_slot", "timeSlot")
     start_time = _get_value(time_slot, "start")
     end_time = _get_value(time_slot, "end")
     if not time_slot or not start_time or not end_time:
         return None
     summary = subject_name or _get_value(item, "event") or "Lekcja"
-    if _is_substitution_lesson(item):
+    if substitution is not None:
+        _LOGGER.debug("Detected substitution lesson.")
+    if substitution is not None or _is_substitution_lesson(item):
         summary = f"{summary} (Zastępstwo)"
     date_value = _resolve_lesson_date(item)
     if not date_value:
@@ -150,6 +167,9 @@ def _build_lesson_event(item: object, tz) -> CalendarEvent | None:
     start_dt = datetime.combine(date_value, start_time, tzinfo=tz)
     end_dt = datetime.combine(date_value, end_time, tzinfo=tz)
     description = _build_event_description(KIND_SCHEDULE, item)
+    room_code = _get_nested_value(substitution, "room", "code") or _get_nested_value(
+        item, "room", "code"
+    )
     location = f"Sala {room_code}" if room_code else None
     return CalendarEvent(
         summary=summary,
@@ -180,32 +200,89 @@ def _resolve_lesson_date(item: object) -> date | None:
     )
     if isinstance(week_start, datetime):
         week_start = week_start.date()
-    normalized_weekday = (
-        _normalize_weekday_value(weekday_value)
-        if isinstance(weekday_value, int)
-        else None
-    )
+    normalized_weekday = _normalize_weekday_value(weekday_value)
+    if weekday_value is not None and normalized_weekday is None:
+        _LOGGER.debug("Unrecognized weekday value '%s'.", weekday_value)
     if date_value is None and isinstance(week_start, date) and normalized_weekday:
-        # BUGFIX: schedule events were not created on Mondays due to incorrect weekday mapping
         return week_start + timedelta(days=normalized_weekday - 1)
     if isinstance(date_value, date) and normalized_weekday:
         if normalized_weekday != date_value.isoweekday():
-            # BUGFIX: schedule events were not created on Mondays due to incorrect weekday mapping
             return date_value + timedelta(
                 days=normalized_weekday - date_value.isoweekday()
             )
     return date_value
 
 
-def _normalize_weekday_value(value: int) -> int | None:
-    if 1 <= value <= 7:
-        return value
-    if 0 <= value <= 6:
-        return value + 1
+def _build_vacation_event(item: Vacation) -> CalendarEvent:
+    start_date = item.date_from
+    end_date = item.date_to + timedelta(days=1)
+    return CalendarEvent(
+        summary=item.name,
+        start=start_date,
+        end=end_date,
+        description="Wakacje / dzień wolny",
+    )
+
+
+def _normalize_weekday_value(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized.isdigit():
+            return _normalize_weekday_value(int(normalized))
+        weekday_map = {
+            "monday": 1,
+            "mon": 1,
+            "poniedzialek": 1,
+            "poniedziałek": 1,
+            "tuesday": 2,
+            "tue": 2,
+            "wtorek": 2,
+            "wednesday": 3,
+            "wed": 3,
+            "sroda": 3,
+            "środa": 3,
+            "thursday": 4,
+            "thu": 4,
+            "czwartek": 4,
+            "friday": 5,
+            "fri": 5,
+            "piatek": 5,
+            "piątek": 5,
+            "saturday": 6,
+            "sat": 6,
+            "sobota": 6,
+            "sunday": 7,
+            "sun": 7,
+            "niedziela": 7,
+        }
+        if normalized in weekday_map:
+            return weekday_map[normalized]
+        _LOGGER.warning("Unexpected weekday value '%s', unable to normalize.", value)
+        _LOGGER.debug("Unusual weekday string encountered: '%s'.", value)
+        return None
+    if isinstance(value, int):
+        if 1 <= value <= 7:
+            return value
+        if 0 <= value <= 6:
+            return value + 1
+        normalized = ((value - 1) % 7) + 1
+        _LOGGER.warning(
+            "Unexpected weekday value '%s', normalizing to %s.", value, normalized
+        )
+        _LOGGER.debug("Unusual weekday integer encountered: '%s'.", value)
+        return normalized
+    _LOGGER.warning("Unexpected weekday value '%s', unable to normalize.", value)
+    _LOGGER.debug("Unusual weekday type encountered: '%s'.", value)
     return None
 
 
 def _is_cancelled_lesson(item: object) -> bool:
+    substitution: ScheduleSubstitution | None = _get_value(item, "substitution")
+    if substitution is not None and _get_value(substitution, "class_absence"):
+        _LOGGER.debug("Cancelled lesson detected via class absence flag.")
+        return True
     if _get_value(
         item,
         "cancelled",
@@ -215,9 +292,13 @@ def _is_cancelled_lesson(item: object) -> bool:
         "isCancelled",
         "isCanceled",
     ):
+        _LOGGER.debug("Cancelled lesson detected via cancellation flags.")
         return True
     status = _get_value(item, "status")
-    return isinstance(status, str) and status.upper() == "CANCELLED"
+    if isinstance(status, str) and status.upper() == "CANCELLED":
+        _LOGGER.debug("Cancelled lesson detected via status field.")
+        return True
+    return False
 
 
 def _is_substitution_lesson(item: object) -> bool:
@@ -283,11 +364,25 @@ def _build_event_description(kind: str, item: object) -> str | None:
 
 
 def _add_schedule_description(lines: list[str], item: object) -> None:
-    teachers = [
-        _teacher_name(_get_value(item, "teacher_primary", "teacherPrimary")),
-        _teacher_name(_get_value(item, "teacher_secondary", "teacherSecondary")),
-        _teacher_name(_get_value(item, "teacher_secondary2", "teacherSecondary2")),
-    ]
+    substitution: ScheduleSubstitution | None = _get_value(item, "substitution")
+    if substitution is not None:
+        teachers = [
+            _teacher_name(
+                _get_value(substitution, "teacher_primary", "teacherPrimary")
+            ),
+            _teacher_name(
+                _get_value(substitution, "teacher_secondary", "teacherSecondary")
+            ),
+            _teacher_name(
+                _get_value(substitution, "teacher_secondary2", "teacherSecondary2")
+            ),
+        ]
+    else:
+        teachers = [
+            _teacher_name(_get_value(item, "teacher_primary", "teacherPrimary")),
+            _teacher_name(_get_value(item, "teacher_secondary", "teacherSecondary")),
+            _teacher_name(_get_value(item, "teacher_secondary2", "teacherSecondary2")),
+        ]
     teacher_names = [teacher for teacher in teachers if teacher]
     if not teacher_names:
         return
