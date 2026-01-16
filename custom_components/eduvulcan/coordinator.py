@@ -49,9 +49,18 @@ class EduVulcanCoordinator(DataUpdateCoordinator[dict[str, object]]):
 
 
 def _resolve_date_range(today: date) -> tuple[date, date]:
-    september_first = date(today.year, 9, 1)
-    if today < september_first:
-        start_date = date(today.year - 1, 9, 1)
-    else:
-        start_date = september_first
-    return start_date, today
+    return _get_school_year_start_date(today), _get_school_year_end_date(today)
+
+
+def _get_school_year_start_date(today: date) -> date:
+    end_of_august = date(today.year, 8, 31)
+    if today <= end_of_august:
+        return date(today.year - 1, 9, 1)
+    return date(today.year, 9, 1)
+
+
+def _get_school_year_end_date(today: date) -> date:
+    end_of_august = date(today.year, 8, 31)
+    if today <= end_of_august:
+        return end_of_august
+    return date(today.year + 1, 8, 31)
