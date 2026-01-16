@@ -2,36 +2,50 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 import logging
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import EduVulcanApi, EduVulcanAccountInfo
-from .const import DOMAIN
+from .api import EduVulcanApi, EduVulcanAccountInfo, slugify_name
+from .const import DOMAIN, UPDATE_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class EduVulcanDataUpdateCoordinator(DataUpdateCoordinator[dict[str, list]]):
+class EduVulcanCoordinator(DataUpdateCoordinator[dict[str, object]]):
     """Coordinator to fetch EduVulcan data on a schedule."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, api: EduVulcanApi) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=timedelta(hours=1),
+            update_interval=UPDATE_INTERVAL,
         )
-        self.api = EduVulcanApi(hass)
+        self.api = api
         self.account_info: EduVulcanAccountInfo | None = None
+        self.last_error: str | None = None
 
-    async def _async_update_data(self) -> dict[str, list]:
+    async def _async_update_data(self) -> dict[str, object]:
         start_date, end_date = _resolve_date_range(date.today())
-        data, account_info = await self.api.async_fetch_data(start_date, end_date)
+        try:
+            data, account_info, token = await self.api.async_fetch_all(
+                start_date, end_date
+            )
+        except Exception as err:  # noqa: BLE001 - surface update failure only
+            self.last_error = str(err)
+            _LOGGER.error("Failed to update EduVulcan data: %s", err)
+            raise UpdateFailed(str(err)) from err
+        self.last_error = None
         self.account_info = account_info
-        return data
+        return {
+            **data,
+            "name": token.name,
+            "slug": slugify_name(token.name),
+            "uid": token.uid,
+        }
 
 
 def _resolve_date_range(today: date) -> tuple[date, date]:

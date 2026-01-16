@@ -5,6 +5,11 @@
         "title": "EduVulcan",
         "description": "Integration uses token from eduvulcan_token.json. No credentials are configured in UI."
       }
+    },
+    "error": {
+      "token_missing": "Token file eduvulcan_token.json is missing in /config.",
+      "token_invalid": "Token file is invalid or missing required fields.",
+      "premium_required": "Premium required."
     }
   }
 }
