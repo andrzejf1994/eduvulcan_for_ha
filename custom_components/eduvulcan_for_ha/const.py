@@ -1,6 +1,6 @@
-"""Constants for the EduVulcan integration."""
+"""Constants for the EduVulcan for HA integration."""
 
-DOMAIN = "eduvulcan"
+DOMAIN = "eduvulcan_for_ha"
 TOKEN_FILENAME = "eduvulcan_token.json"
 CONFIRMATION_TEXT = (
     "Integration uses token from eduvulcan_token.json. "
