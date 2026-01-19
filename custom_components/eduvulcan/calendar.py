@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+import logging
 
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
@@ -14,6 +15,8 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, KIND_EXAMS, KIND_HOMEWORK, KIND_SCHEDULE
 from .coordinator import EduVulcanCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,8 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
 
     def _build_event(self, item: object, tz) -> CalendarEvent | None:
         if isinstance(item, dict):
+            if self._definition.kind == KIND_SCHEDULE:
+                return _build_lesson_event(item, tz)
             return _build_generic_event(item, self._definition.all_day, tz)
         if self._definition.kind == KIND_SCHEDULE:
             return _build_lesson_event(item, tz)
@@ -134,18 +139,39 @@ def _build_lesson_event(item: object, tz) -> CalendarEvent | None:
     if _is_cancelled_lesson(item):
         # Skip cancelled lessons – do not create calendar events
         return None
-    subject_name = _get_nested_value(item, "subject", "name")
-    room_code = _get_nested_value(item, "room", "code")
-    time_slot = _get_value(item, "time_slot", "timeSlot")
-    start_time = _get_value(time_slot, "start")
-    end_time = _get_value(time_slot, "end")
+    substitution = _get_value(item, "substitution", "Substitution")
+    subject_name = _get_nested_value(item, "subject", "name") or _get_nested_value(
+        item, "Subject", "Name"
+    )
+    substitution_subject = _get_nested_value(
+        substitution, "subject", "name"
+    ) or _get_nested_value(substitution, "Subject", "Name")
+    if substitution_subject:
+        subject_name = substitution_subject
+    room_code = (
+        _get_nested_value(substitution, "room", "code")
+        or _get_nested_value(substitution, "Room", "Code")
+        or _get_nested_value(item, "room", "code")
+        or _get_nested_value(item, "Room", "Code")
+    )
+    time_slot = _get_value(item, "time_slot", "timeSlot", "TimeSlot")
+    start_time = _coerce_time_value(_get_value(time_slot, "start", "Start"))
+    end_time = _coerce_time_value(_get_value(time_slot, "end", "End"))
     if not time_slot or not start_time or not end_time:
+        _LOGGER.debug(
+            "Skipping lesson without time slot: time_slot=%s start=%s end=%s item=%s",
+            time_slot,
+            start_time,
+            end_time,
+            item,
+        )
         return None
-    summary = subject_name or _get_value(item, "event") or "Lekcja"
+    summary = subject_name or _get_value(item, "event", "Event") or "Lekcja"
     if _is_substitution_lesson(item):
         summary = f"{summary} (Zastępstwo)"
     date_value = _resolve_lesson_date(item)
     if not date_value:
+        _LOGGER.debug("Skipping lesson without date: item=%s", item)
         return None
     start_dt = datetime.combine(date_value, start_time, tzinfo=tz)
     end_dt = datetime.combine(date_value, end_time, tzinfo=tz)
@@ -163,7 +189,13 @@ def _build_lesson_event(item: object, tz) -> CalendarEvent | None:
 def _resolve_lesson_date(item: object) -> date | None:
     date_value = _get_value(item, "date_", "date", "dateAt", "DateAt")
     if isinstance(date_value, datetime):
-        date_value = date_value.date()
+        return date_value.date()
+    if isinstance(date_value, date):
+        return date_value
+    if isinstance(date_value, str):
+        parsed_date = _coerce_date_value(date_value)
+        if parsed_date:
+            return parsed_date
     weekday_value = _get_value(
         item,
         "day",
@@ -180,24 +212,19 @@ def _resolve_lesson_date(item: object) -> date | None:
     )
     if isinstance(week_start, datetime):
         week_start = week_start.date()
-    normalized_weekday = (
-        _normalize_weekday_value(weekday_value)
-        if isinstance(weekday_value, int)
-        else None
-    )
-    if date_value is None and isinstance(week_start, date) and normalized_weekday:
-        # BUGFIX: schedule events were not created on Mondays due to incorrect weekday mapping
+    normalized_weekday = _normalize_weekday_value(weekday_value)
+    if isinstance(week_start, date) and normalized_weekday:
         return week_start + timedelta(days=normalized_weekday - 1)
-    if isinstance(date_value, date) and normalized_weekday:
-        if normalized_weekday != date_value.isoweekday():
-            # BUGFIX: schedule events were not created on Mondays due to incorrect weekday mapping
-            return date_value + timedelta(
-                days=normalized_weekday - date_value.isoweekday()
-            )
-    return date_value
+    return None
 
 
-def _normalize_weekday_value(value: int) -> int | None:
+def _normalize_weekday_value(value: int | str | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip().isdigit():
+            return None
+        value = int(value)
     if 1 <= value <= 7:
         return value
     if 0 <= value <= 6:
@@ -206,6 +233,16 @@ def _normalize_weekday_value(value: int) -> int | None:
 
 
 def _is_cancelled_lesson(item: object) -> bool:
+    substitution = _get_value(item, "substitution", "Substitution")
+    change_type = _get_nested_value(substitution, "change", "type") or _get_nested_value(
+        substitution, "Change", "Type"
+    )
+    if change_type in {0, 1, 4}:
+        return True
+    if _get_value(
+        substitution, "class_absence", "classAbsence", "ClassAbsence"
+    ) is True:
+        return True
     if _get_value(
         item,
         "cancelled",
@@ -221,6 +258,9 @@ def _is_cancelled_lesson(item: object) -> bool:
 
 
 def _is_substitution_lesson(item: object) -> bool:
+    substitution = _get_value(item, "substitution", "Substitution")
+    if substitution:
+        return True
     if _get_value(
         item,
         "substitution",
@@ -283,11 +323,47 @@ def _build_event_description(kind: str, item: object) -> str | None:
 
 
 def _add_schedule_description(lines: list[str], item: object) -> None:
+    substitution = _get_value(item, "substitution", "Substitution")
+    teacher_source = substitution if substitution else item
     teachers = [
-        _teacher_name(_get_value(item, "teacher_primary", "teacherPrimary")),
-        _teacher_name(_get_value(item, "teacher_secondary", "teacherSecondary")),
-        _teacher_name(_get_value(item, "teacher_secondary2", "teacherSecondary2")),
+        _teacher_name(
+            _get_value(
+                teacher_source, "teacher_primary", "teacherPrimary", "TeacherPrimary"
+            )
+        ),
+        _teacher_name(
+            _get_value(
+                teacher_source,
+                "teacher_secondary",
+                "teacherSecondary",
+                "TeacherSecondary",
+            )
+        ),
+        _teacher_name(
+            _get_value(
+                teacher_source,
+                "teacher_secondary2",
+                "teacherSecondary2",
+                "TeacherSecondary2",
+            )
+        ),
     ]
+    _add_line(
+        lines,
+        "Powód nieobecności",
+        _get_nested_value(substitution, "teacher_absence_effect_name")
+        or _get_nested_value(substitution, "TeacherAbsenceEffectName")
+        or _get_nested_value(item, "teacher_absence_effect_name")
+        or _get_nested_value(item, "TeacherAbsenceEffectName"),
+    )
+    _add_line(
+        lines,
+        "Powód",
+        _get_nested_value(substitution, "reason")
+        or _get_nested_value(substitution, "Reason")
+        or _get_nested_value(item, "reason")
+        or _get_nested_value(item, "Reason"),
+    )
     teacher_names = [teacher for teacher in teachers if teacher]
     if not teacher_names:
         return
@@ -296,24 +372,57 @@ def _add_schedule_description(lines: list[str], item: object) -> None:
 
 
 def _add_homework_description(lines: list[str], item: object) -> None:
-    _add_line(lines, "Przedmiot", _get_nested_value(item, "subject", "name"))
-    _add_line(lines, "Treść", _get_value(item, "content", "description"))
-    _add_line(lines, "Utworzono", _get_value(item, "created_at", "createdAt"))
-    _add_line(lines, "Zmieniono", _get_value(item, "modified_at", "modifiedAt"))
+    content = _get_value(item, "content", "description")
+    if content:
+        lines.append(str(content))
 
 
 def _add_exam_description(lines: list[str], item: object) -> None:
-    _add_line(lines, "Rodzaj", _get_value(item, "type"))
-    _add_line(lines, "Opis", _get_value(item, "content", "description"))
-    _add_line(lines, "Nauczyciel", _teacher_name(_get_value(item, "creator")))
-    _add_line(lines, "Utworzono", _get_value(item, "created_at", "createdAt"))
-    _add_line(lines, "Zmieniono", _get_value(item, "modified_at", "modifiedAt"))
+    content = _get_value(item, "content", "description")
+    if content:
+        lines.append(str(content))
 
 
 def _teacher_name(teacher) -> str | None:
     if not teacher:
         return None
+    if isinstance(teacher, dict):
+        display_name = (
+            teacher.get("display_name")
+            or teacher.get("displayName")
+            or teacher.get("DisplayName")
+        )
+        if display_name:
+            return display_name
+        name = teacher.get("name") or teacher.get("Name") or ""
+        surname = teacher.get("surname") or teacher.get("Surname") or ""
+        full = f"{name} {surname}".strip()
+        return full if full else None
     return teacher.display_name or f"{teacher.name} {teacher.surname}"
+
+
+def _coerce_time_value(value: object) -> time | None:
+    if isinstance(value, time):
+        return value
+    if isinstance(value, datetime):
+        return value.time()
+    if isinstance(value, str):
+        try:
+            return time.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_date_value(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
 
 
 def _add_line(lines: list[str], label: str, value: object) -> None:
