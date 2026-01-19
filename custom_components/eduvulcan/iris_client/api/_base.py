@@ -88,18 +88,42 @@ class IrisApi:
         page_size: int = DEFAULT_PAGE_SIZE,
         last_sync_date: datetime = EPOCH_START_DATETIME,
     ) -> list[Schedule]:
-        envelope = await self._http.request(
-            method="GET",
-            rest_url=rest_url,
-            pupil_id=pupil_id,
-            endpoint="mobile/schedule/withchanges/byPupil",
-            query={
-                "pupilId": pupil_id,
-                "dateFrom": date_from,
-                "dateTo": date_to,
-                "lastId": last_id,
-                "pageSize": page_size,
-                "lastSyncDate": last_sync_date,
-            },
-        )
-        return [Schedule.model_validate(schedule) for schedule in envelope]
+        items: list[dict] = []
+        next_last_id = last_id
+        while True:
+            envelope = await self._http.request(
+                method="GET",
+                rest_url=rest_url,
+                pupil_id=pupil_id,
+                endpoint="mobile/schedule/withchanges/byPupil",
+                query={
+                    "pupilId": pupil_id,
+                    "dateFrom": date_from,
+                    "dateTo": date_to,
+                    "lastId": next_last_id,
+                    "pageSize": page_size,
+                    "lastSyncDate": last_sync_date,
+                },
+            )
+            if not envelope:
+                break
+            items.extend(envelope)
+            if len(envelope) < page_size:
+                break
+            max_id = _max_schedule_id(envelope)
+            if max_id is None or max_id == next_last_id:
+                break
+            next_last_id = max_id
+        return [Schedule.model_validate(schedule) for schedule in items]
+
+
+def _max_schedule_id(envelope: list[dict]) -> int | None:
+    max_id: int | None = None
+    for entry in envelope:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = entry.get("Id")
+        if isinstance(entry_id, int):
+            if max_id is None or entry_id > max_id:
+                max_id = entry_id
+    return max_id
