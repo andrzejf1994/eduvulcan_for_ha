@@ -135,6 +135,32 @@ class EduVulcanApi:
             date_to=end_date,
         )
 
+    async def async_get_vacations(
+        self, token: TokenData, start_date: date, end_date: date
+    ) -> list[object]:
+        account = await self.async_get_account_info(token)
+        if hasattr(self._api, "get_vacations"):
+            return await self._api.get_vacations(
+                rest_url=account.rest_url,
+                pupil_id=account.pupil_id,
+                date_from=start_date,
+                date_to=end_date,
+            )
+        http = getattr(self._api, "_http", None)
+        if http is None:
+            raise HomeAssistantError("Iris API does not support vacations.")
+        return await http.request(
+            method="GET",
+            rest_url=account.rest_url,
+            pupil_id=account.pupil_id,
+            endpoint="mobile/school/vacation",
+            query={
+                "pupilId": account.pupil_id,
+                "dateFrom": start_date,
+                "dateTo": end_date,
+            },
+        )
+
     async def async_fetch_all(
         self, start_date: date, end_date: date
     ) -> tuple[dict[str, list[object]], EduVulcanAccountInfo, TokenData]:
@@ -159,10 +185,12 @@ class EduVulcanApi:
             date_from=start_date,
             date_to=end_date,
         )
+        vacations = await self.async_get_vacations(token, start_date, end_date)
         return {
             "schedule": lessons,
             "homework": homework,
             "exams": exams,
+            "vacations": vacations,
         }, account, token
 
     async def async_close(self) -> None:

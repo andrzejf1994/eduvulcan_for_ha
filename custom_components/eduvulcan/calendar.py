@@ -69,7 +69,7 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
     def event(self) -> CalendarEvent | None:
         """Return the next upcoming event."""
         data = self.coordinator.data or {}
-        items = data.get(self._definition.kind, [])
+        items = _collect_calendar_items(data, self._definition.kind)
         tz = dt_util.get_time_zone(self.hass.config.time_zone)
         now = dt_util.utcnow()
         upcoming: list[CalendarEvent] = []
@@ -93,7 +93,7 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
         end_date: datetime,
     ) -> list[CalendarEvent]:
         data = self.coordinator.data or {}
-        items = data.get(self._definition.kind, [])
+        items = _collect_calendar_items(data, self._definition.kind)
         tz = dt_util.get_time_zone(hass.config.time_zone)
         events: list[CalendarEvent] = []
         for item in items:
@@ -107,15 +107,26 @@ class EduVulcanCalendarEntity(CoordinatorEntity, CalendarEntity):
     def _build_event(self, item: object, tz) -> CalendarEvent | None:
         if isinstance(item, dict):
             if self._definition.kind == KIND_SCHEDULE:
+                if _is_vacation_item(item):
+                    return _build_vacation_event(item)
                 return _build_lesson_event(item, tz)
             return _build_generic_event(item, self._definition.all_day, tz)
         if self._definition.kind == KIND_SCHEDULE:
+            if _is_vacation_item(item):
+                return _build_vacation_event(item)
             return _build_lesson_event(item, tz)
         if self._definition.kind == KIND_HOMEWORK:
             return _build_homework_event(item)
         if self._definition.kind == KIND_EXAMS:
             return _build_exam_event(item)
         return None
+
+
+def _collect_calendar_items(data: dict, kind: str) -> list[object]:
+    items = list(data.get(kind, []) or [])
+    if kind == KIND_SCHEDULE:
+        items.extend(data.get("vacations", []) or [])
+    return items
 
 
 def _event_in_range(
@@ -183,6 +194,38 @@ def _build_lesson_event(item: object, tz) -> CalendarEvent | None:
         end=end_dt,
         description=description,
         location=location,
+    )
+
+
+def _is_vacation_item(item: object) -> bool:
+    name = _get_value(item, "name", "Name")
+    date_from = _get_value(item, "date_from", "dateFrom", "From")
+    date_to = _get_value(item, "date_to", "dateTo", "To")
+    return bool(name and date_from and date_to)
+
+
+def _build_vacation_event(item: object) -> CalendarEvent | None:
+    name = _get_value(item, "name", "Name") or "Dzien wolny"
+    date_from = _get_value(item, "date_from", "dateFrom", "From")
+    date_to = _get_value(item, "date_to", "dateTo", "To")
+    if isinstance(date_from, datetime):
+        start_date = date_from.date()
+    elif isinstance(date_from, str):
+        start_date = _coerce_date_value(date_from)
+    else:
+        start_date = date_from
+    if isinstance(date_to, datetime):
+        end_date = date_to.date()
+    elif isinstance(date_to, str):
+        end_date = _coerce_date_value(date_to)
+    else:
+        end_date = date_to
+    if not isinstance(start_date, date) or not isinstance(end_date, date):
+        return None
+    return CalendarEvent(
+        summary=str(name),
+        start=start_date,
+        end=end_date + timedelta(days=1),
     )
 
 
