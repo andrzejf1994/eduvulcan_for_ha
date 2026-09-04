@@ -7,7 +7,6 @@ from typing import Any
 from homeassistant import config_entries
 import voluptuous as vol
 
-from .api import PREMIUM_CAPS
 from .const import DOMAIN, TOKEN_FILE
 
 
@@ -33,10 +32,7 @@ class EduVulcanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 jwt_payload = data.get("jwt_payload") or {}
                 uid = jwt_payload.get("uid")
                 name = jwt_payload.get("name")
-                caps = jwt_payload.get("caps")
-                if caps != PREMIUM_CAPS:
-                    errors["base"] = "premium_required"
-                elif not uid or not name:
+                if not uid or not name:
                     errors["base"] = "token_invalid"
                 else:
                     await self.async_set_unique_id(uid)

@@ -1,17 +1,12 @@
 """EduVulcan integration."""
 
-import logging
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError
 
 from .api import EduVulcanApi
 from .const import DOMAIN, PLATFORMS
 from .coordinator import EduVulcanCoordinator
-
-_LOGGER = logging.getLogger(__name__)
-
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EduVulcan from a config entry."""
@@ -19,9 +14,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api = EduVulcanApi(hass)
     try:
         await api.async_load_token()
-    except ConfigEntryAuthFailed:
-        _LOGGER.error("Premium required")
-        raise
     except HomeAssistantError as err:
         raise HomeAssistantError(str(err)) from err
     coordinator = EduVulcanCoordinator(hass, api)

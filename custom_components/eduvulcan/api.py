@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
@@ -11,15 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import TOKEN_FILE
 from .iris_client.api import IrisHebeCeApi
 from .iris_client.credentials import RsaCredential
-
-_LOGGER = logging.getLogger(__name__)
-
-PREMIUM_CAPS = "[\"EDUVULCAN_PREMIUM\"]"
 
 _POLISH_TRANSLATION = str.maketrans(
     {
@@ -67,7 +62,7 @@ class EduVulcanApi:
         self._api = IrisHebeCeApi(self._credential)
 
     async def async_load_token(self) -> TokenData:
-        """Load token file and validate premium capabilities."""
+        """Load token file and validate required fields."""
         data = await self._async_read_token_file()
         jwt = data.get("jwt")
         tenant = data.get("tenant")
@@ -79,9 +74,6 @@ class EduVulcanApi:
             raise HomeAssistantError("Token file missing required fields.")
         if not name or not uid:
             raise HomeAssistantError("Token payload missing name or uid.")
-        if caps != PREMIUM_CAPS:
-            _LOGGER.error("Premium required")
-            raise ConfigEntryAuthFailed("Premium required")
         return TokenData(jwt=jwt, tenant=tenant, name=name, uid=uid, caps=caps)
 
     async def async_get_account_info(self, token: TokenData) -> EduVulcanAccountInfo:

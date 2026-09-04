@@ -25,12 +25,13 @@ Create `/config/eduvulcan_token.json` with the following content:
   "jwt": "...",
   "tenant": "...",
   "jwt_payload": {
-    "caps": ["EDUVULCAN_PREMIUM"]
+    "name": "...",
+    "uid": "..."
   }
 }
 ```
 
-If the token file is missing, incomplete, or lacks the `EDUVULCAN_PREMIUM` capability, the integration will fail to load.
+If the token file is missing or incomplete, the integration will fail to load. A Premium capability is not required.
 
 ## Usage
 

@@ -8,8 +8,7 @@
     },
     "error": {
       "token_missing": "Token file eduvulcan_token.json is missing in /config.",
-      "token_invalid": "Token file is invalid or missing required fields.",
-      "premium_required": "Premium required."
+      "token_invalid": "Token file is invalid or missing required fields."
     }
   }
 }
