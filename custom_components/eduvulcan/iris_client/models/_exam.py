@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -18,7 +19,7 @@ class Exam(BaseModel):
     creator: Employee = Field(alias="Creator")
     subject: Subject = Field(alias="Subject")
     pupil_id: int = Field(alias="PupilId")
-    didactics: any = Field(alias="Didactics")
+    didactics: Any = Field(alias="Didactics")
 
     class Config:
         arbitrary_types_allowed = True

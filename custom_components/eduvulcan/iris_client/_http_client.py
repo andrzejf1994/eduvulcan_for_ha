@@ -1,5 +1,6 @@
 import json
 from datetime import date, datetime
+from typing import Any
 from uuid import uuid4
 
 from aiohttp import ClientSession
@@ -46,7 +47,7 @@ class HttpClient:
         self._app_version_code = app_version_code
         self._client = ClientSession(skip_auto_headers={"Accept", "Content-Length"})
 
-    def _serialize_query(self, query: dict[str, any]) -> dict[str, str]:
+    def _serialize_query(self, query: dict[str, Any]) -> dict[str, str]:
         datetime_format = "%Y-%m-%d %H:%M:%S"
         date_format = "%Y-%m-%d"
 
@@ -62,7 +63,7 @@ class HttpClient:
                 stringify[key] = str(value)
         return stringify
 
-    def _build_body(self, envelope: any) -> str:
+    def _build_body(self, envelope: Any) -> str:
         now = datetime.now()
         return json.dumps(
             {
@@ -105,8 +106,8 @@ class HttpClient:
         endpoint: str,
         rest_url: str,
         pupil_id: int | None = None,
-        query: dict[str, any] | None = None,
-        payload: any = None,
+        query: dict[str, Any] | None = None,
+        payload: Any = None,
         verify_response: bool = True,
     ):
         url = f"{rest_url}/{endpoint}"
@@ -127,7 +128,7 @@ class HttpClient:
 
         if response.status != 200:
             raise HttpUnsuccessfullStatusException(
-                f"{response.status}: {await response.text()}"
+                response.status, await response.text()
             )
 
         body_text = await response.text()

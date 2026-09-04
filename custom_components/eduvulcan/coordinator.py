@@ -123,7 +123,5 @@ def _get_school_year_start_date(today: date) -> date:
 
 
 def _get_school_year_end_date(today: date) -> date:
-    end_of_august = date(today.year, 8, 31)
-    if today <= end_of_august:
-        return end_of_august
-    return date(today.year + 1, 8, 31)
+    start_date = _get_school_year_start_date(today)
+    return date(start_date.year + 1, 6, 30)

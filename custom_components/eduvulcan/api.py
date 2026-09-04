@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import TOKEN_FILE
+from .iris_client._exceptions import HttpUnsuccessfullStatusException
 from .iris_client.api import IrisHebeCeApi
 from .iris_client.credentials import RsaCredential
 
@@ -141,17 +142,22 @@ class EduVulcanApi:
         http = getattr(self._api, "_http", None)
         if http is None:
             raise HomeAssistantError("Iris API does not support vacations.")
-        return await http.request(
-            method="GET",
-            rest_url=account.rest_url,
-            pupil_id=account.pupil_id,
-            endpoint="mobile/school/vacation",
-            query={
-                "pupilId": account.pupil_id,
-                "dateFrom": start_date,
-                "dateTo": end_date,
-            },
-        )
+        try:
+            return await http.request(
+                method="GET",
+                rest_url=account.rest_url,
+                pupil_id=account.pupil_id,
+                endpoint="mobile/school/vacation",
+                query={
+                    "pupilId": account.pupil_id,
+                    "dateFrom": start_date,
+                    "dateTo": end_date,
+                },
+            )
+        except HttpUnsuccessfullStatusException as err:
+            if err.status_code != 404:
+                raise
+            return []
 
     async def async_fetch_all(
         self, start_date: date, end_date: date
